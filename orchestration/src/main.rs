@@ -10,6 +10,7 @@ use std::{
   fs,
   process::{Stdio, Command},
 };
+use std::error::Error;
 use std::io::Read;
 
 use zeroize::Zeroizing;
@@ -44,11 +45,13 @@ use processor::processor;
 
 mod coordinator;
 use coordinator::coordinator;
+use dalek_ff_group::Scalar;
 
 mod serai;
 use serai::serai;
 
 mod docker;
+mod telemetry;
 
 #[global_allocator]
 static ALLOCATOR: zalloc::ZeroizingAlloc<std::alloc::System> =
@@ -335,23 +338,38 @@ fn dockerfiles(network: Network) {
 }
 
 fn key_gen(network: Network) {
-  let serai_dir = home::home_dir().unwrap().join(".serai").join(network.label());
-  let key_file = serai_dir.join("key");
-  let hex_enc = |key: dalek_ff_group::Scalar| { hex::encode((<Ristretto as Ciphersuite>::generator() * key).to_bytes()) };
-  if let Ok(mut f) = fs::File::open(&key_file) {
-    let mut key_bytes: [u8; 32] = [0; 32];
-    f.read_exact(&mut key_bytes).expect("could not read serai key");
-    let key = <Ristretto as Ciphersuite>::F::from_bytes_mod_order(key_bytes);
-    println!("Already created key, public key: {}", hex_enc(key));
-    return;
+  let key_file = get_serai_key_file_path(network);
+
+  match get_serai_pub_key(network) {
+    Ok(pub_key) =>  {
+      println!("Already created key, public key: {}", pub_key);
+      return;
+    },
+    Err(_e) => eprintln!("Could not read serai key, creating a new one"),
   }
+  let key: Scalar = <Ristretto as Ciphersuite>::F::random(&mut OsRng);
 
-  let key: dalek_ff_group::Scalar = <Ristretto as Ciphersuite>::F::random(&mut OsRng);
-
-  let _ = fs::create_dir_all(&serai_dir);
+  let _ = fs::create_dir_all(&key_file.parent().unwrap());
   fs::write(key_file, key.to_repr()).expect("couldn't write key");
 
-  println!("public key: {}", hex_enc(key));
+  println!("public key: {}", hex::encode((<Ristretto as Ciphersuite>::generator() * key).to_bytes()));
+}
+
+fn get_serai_key_file_path(network: Network) -> PathBuf {
+  home::home_dir()
+      .expect("Failed to get home directory")
+      .join(".serai")
+      .join(network.label())
+      .join("key")
+}
+
+fn get_serai_pub_key(network: Network) -> Result<String, Box<dyn Error>> {
+  let file_path = get_serai_key_file_path(network);
+  let mut f = fs::File::open(file_path)?;
+  let mut key_bytes: [u8; 32] = [0; 32];
+  f.read_exact(&mut key_bytes)?;
+  let key = <Ristretto as Ciphersuite>::F::from_bytes_mod_order(key_bytes);
+  Ok(hex::encode((<Ristretto as Ciphersuite>::generator() * key).to_bytes()))
 }
 
 fn start(network: Network, services: HashSet<String>) {
@@ -480,8 +498,10 @@ fn start(network: Network, services: HashSet<String>) {
       let command = command.arg("create").arg("--name").arg(&docker_name);
       let command = command.arg("--network").arg("serai");
       let command = command.arg("--restart").arg("always");
-      let command = command.arg("--log-opt").arg("max-size=100m");
-      let command = command.arg("--log-opt").arg("max-file=3");
+      //let command = command.arg("--log-opt").arg("max-size=100m");
+      //let command = command.arg("--log-opt").arg("max-file=3");
+      let command = command.arg("--log-driver=fluentd");
+      let command = command.arg("--log-opt").arg("fluentd-address=127.0.0.1:24224");
       let command = if network == Network::Dev {
         command
       } else {
