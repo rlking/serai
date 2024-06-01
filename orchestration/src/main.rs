@@ -10,6 +10,7 @@ use std::{
   fs,
   process::{Stdio, Command},
 };
+use std::io::Read;
 
 use zeroize::Zeroizing;
 
@@ -336,20 +337,21 @@ fn dockerfiles(network: Network) {
 fn key_gen(network: Network) {
   let serai_dir = home::home_dir().unwrap().join(".serai").join(network.label());
   let key_file = serai_dir.join("key");
-  if fs::File::open(&key_file).is_ok() {
-    println!("already created key");
+  let hex_enc = |key: dalek_ff_group::Scalar| { hex::encode((<Ristretto as Ciphersuite>::generator() * key).to_bytes()) };
+  if let Ok(mut f) = fs::File::open(&key_file) {
+    let mut key_bytes: [u8; 32] = [0; 32];
+    f.read_exact(&mut key_bytes).expect("could not read serai key");
+    let key = <Ristretto as Ciphersuite>::F::from_bytes_mod_order(key_bytes);
+    println!("Already created key, public key: {}", hex_enc(key));
     return;
   }
 
-  let key = <Ristretto as Ciphersuite>::F::random(&mut OsRng);
+  let key: dalek_ff_group::Scalar = <Ristretto as Ciphersuite>::F::random(&mut OsRng);
 
   let _ = fs::create_dir_all(&serai_dir);
   fs::write(key_file, key.to_repr()).expect("couldn't write key");
 
-  println!(
-    "Public Key: {}",
-    hex::encode((<Ristretto as Ciphersuite>::generator() * key).to_bytes())
-  );
+  println!("public key: {}", hex_enc(key));
 }
 
 fn start(network: Network, services: HashSet<String>) {

@@ -220,6 +220,10 @@ impl Scalar {
     Self(DScalar::from_bytes_mod_order_wide(bytes))
   }
 
+  pub fn from_bytes_mod_order(bytes: [u8; 32]) -> Scalar {
+    Self(DScalar::from_bytes_mod_order(bytes))
+  }
+
   /// Derive a Scalar without bias from a digest via wide reduction.
   pub fn from_hash<D: Digest<OutputSize = U64> + HashMarker>(hash: D) -> Scalar {
     let mut output = [0u8; 64];

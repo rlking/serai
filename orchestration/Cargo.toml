@@ -24,6 +24,7 @@ rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 
 transcript = { package = "flexible-transcript", path = "../crypto/transcript", default-features = false, features = ["std", "recommended"] }
 ciphersuite = { path = "../crypto/ciphersuite", default-features = false, features = ["std", "ristretto"] }
+dalek-ff-group = { path = "../crypto/dalek-ff-group" }
 
 zalloc = { path = "../common/zalloc" }
 
