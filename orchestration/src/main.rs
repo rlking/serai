@@ -3,29 +3,29 @@
 
 use core::ops::Deref;
 use std::{
-  collections::{HashSet, HashMap},
+  collections::{HashMap, HashSet},
   env,
-  path::PathBuf,
-  io::Write,
   fs,
-  process::{Stdio, Command},
+  io::Write,
+  path::PathBuf,
+  process::{Command, Stdio},
 };
 use std::error::Error;
 use std::io::Read;
 
 use zeroize::Zeroizing;
 
-use rand_core::{RngCore, SeedableRng, OsRng};
+use rand_core::{OsRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
-use transcript::{Transcript, RecommendedTranscript};
+use transcript::{RecommendedTranscript, Transcript};
 
 use ciphersuite::{
+  Ciphersuite,
   group::{
     ff::{Field, PrimeField},
     GroupEncoding,
-  },
-  Ciphersuite, Ristretto,
+  }, Ristretto,
 };
 
 mod mimalloc;
@@ -49,6 +49,7 @@ use dalek_ff_group::Scalar;
 
 mod serai;
 use serai::serai;
+use crate::telemetry::setup_fluentbit;
 
 mod docker;
 mod telemetry;
@@ -271,7 +272,7 @@ fn infrastructure_keys(network: Network) -> InfrastructureKeys {
   ])
 }
 
-fn dockerfiles(network: Network) {
+fn dockerfiles(network: Network, collector_host: Option<&str>) {
   let orchestration_path = orchestration_path(network);
 
   bitcoin(&orchestration_path, network);
@@ -323,7 +324,7 @@ fn dockerfiles(network: Network) {
 
   let serai_key = {
     let serai_key = Zeroizing::new(
-      fs::read(home::home_dir().unwrap().join(".serai").join(network.label()).join("key"))
+      fs::read(get_serai_key_file_path(network))
         .expect("couldn't read key for this network"),
     );
     let mut serai_key_repr =
@@ -335,6 +336,10 @@ fn dockerfiles(network: Network) {
   coordinator(&orchestration_path, network, coordinator_key.0, &serai_key);
 
   serai(&orchestration_path, network, &serai_key);
+
+  if let Some(host) = collector_host {
+    setup_fluentbit(&orchestration_path, network, host)
+  }
 }
 
 fn key_gen(network: Network) {
@@ -363,7 +368,7 @@ fn get_serai_key_file_path(network: Network) -> PathBuf {
       .join("key")
 }
 
-fn get_serai_pub_key(network: Network) -> Result<String, Box<dyn Error>> {
+pub fn get_serai_pub_key(network: Network) -> Result<String, Box<dyn Error>> {
   let file_path = get_serai_key_file_path(network);
   let mut f = fs::File::open(file_path)?;
   let mut key_bytes: [u8; 32] = [0; 32];
@@ -383,7 +388,20 @@ fn start(network: Network, services: HashSet<String>) {
     .output()
     .unwrap();
 
-  for service in services {
+  let use_fluentbit_logging_driver = services.contains("otel-logging");
+
+  //TODO: move to vec and ensure correct order already during cmd parsing
+  let mut services_vec: Vec<String> = Vec::with_capacity(services.len());
+  if services.contains("otel-logging") {
+    services_vec.push("otel-logging".to_string());
+  }
+  for service in &services {
+    if service != "otel-logging" {
+      services_vec.push(service.clone());
+    }
+  }
+
+  for service in services_vec {
     println!("Starting {service}");
     let name = match service.as_ref() {
       "serai" => "serai",
@@ -395,6 +413,7 @@ fn start(network: Network, services: HashSet<String>) {
       "monero-daemon" => "monero",
       "monero-processor" => "monero-processor",
       "monero-wallet-rpc" => "monero-wallet-rpc",
+      "otel-logging" => "fluentbit",
       _ => panic!("starting unrecognized service"),
     };
 
@@ -498,10 +517,24 @@ fn start(network: Network, services: HashSet<String>) {
       let command = command.arg("create").arg("--name").arg(&docker_name);
       let command = command.arg("--network").arg("serai");
       let command = command.arg("--restart").arg("always");
-      //let command = command.arg("--log-opt").arg("max-size=100m");
-      //let command = command.arg("--log-opt").arg("max-file=3");
-      let command = command.arg("--log-driver=fluentd");
-      let command = command.arg("--log-opt").arg("fluentd-address=127.0.0.1:24224");
+      if use_fluentbit_logging_driver && name != "fluentbit" {
+        // get ip because dns resolve of serai-testnet-fluentbit is not reliable even though both are in serai network
+        if let Ok(fluentd_ip) = Command::new("docker")
+            .arg("inspect")
+            .arg("-f")
+            .arg("{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}")
+            .arg("serai-testnet-fluentbit")
+            .output()
+        {
+          if let Ok(fluentd_ip) = String::from_utf8(fluentd_ip.stdout) {
+            let command = command.arg("--log-driver=fluentd");
+            command.arg("--log-opt").arg(format!("fluentd-address={}:24224", fluentd_ip.trim()));
+          }
+        }
+      } else {
+        let command = command.arg("--log-opt").arg("max-size=100m");
+        command.arg("--log-opt").arg("max-file=3");
+      }
       let command = if network == Network::Dev {
         command
       } else {
@@ -550,6 +583,9 @@ fn start(network: Network, services: HashSet<String>) {
             // Publish the port
             command.arg("-p").arg("30333:30333")
           }
+        }
+        "otel-logging" => {
+          command.arg("-p").arg("24224:24224").arg("-p").arg("24224:24224/udp")
         }
         _ => command,
       };
@@ -617,7 +653,14 @@ Commands:
       key_gen(network);
     }
     Some("setup") => {
-      dockerfiles(network);
+      let mut collector_host = None;
+      for arg in args {
+        if let Some(stripped_host) = arg.strip_prefix("--collector-host=") {
+          collector_host = Some(stripped_host.to_string());
+          continue
+        }
+      }
+      dockerfiles(network, collector_host.as_deref());
     }
     Some("start") => {
       let mut services = HashSet::new();
