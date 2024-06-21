@@ -21,6 +21,8 @@ pub fn setup_fluentbit(orchestration_path: &Path, network: Network, host: &str) 
     Port 21892
     URI /log/ingest
     Format json
+    json_date_key time
+    json_date_format iso8601
     tls  On
 
 [FILTER]
