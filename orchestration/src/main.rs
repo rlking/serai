@@ -12,6 +12,8 @@ use std::{
 };
 use std::error::Error;
 use std::io::Read;
+use std::net::IpAddr;
+use std::str::FromStr;
 
 use zeroize::Zeroizing;
 
@@ -523,13 +525,18 @@ fn start(network: Network, services: HashSet<String>) {
             .arg("inspect")
             .arg("-f")
             .arg("{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}")
-            .arg("serai-testnet-fluentbit")
+            .arg(format!("serai-{}-fluentbit", network.label()))
             .output()
         {
           if let Ok(fluentd_ip) = String::from_utf8(fluentd_ip.stdout) {
-            let command = command.arg("--log-driver=fluentd");
-            command.arg("--log-opt").arg(format!("fluentd-address={}:24224", fluentd_ip.trim()));
+            let fluentd_ip = fluentd_ip.trim();
+            IpAddr::from_str(fluentd_ip).expect("no valid ip for fluentd found");
+            command
+                .arg("--log-driver=fluentd")
+                .arg("--log-opt")
+                .arg(format!("fluentd-address={}:24224", fluentd_ip));
           }
+
         }
       } else {
         let command = command.arg("--log-opt").arg("max-size=100m");
